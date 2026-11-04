@@ -1,18 +1,40 @@
 # -*- coding: utf-8 -*-
-"""GXGC 管线数据库可视化与撞管分析系统 v2.1
+"""GXGC 管线数据库可视化与撞管分析系统 v2.2
 功能：SHP 读取 / 2D-3D 图形浏览 / 管线段·管线点查表 / 管长统计
       撞管检测（平面+立面，结果表停靠于平面图下方同屏查看）/
       纵断面图（单段 / 拉框多段串接） / DXF 导出（国标字体+风险点标记）/
-      SHP 导出 / 撞管检测报告(HTML) / 统计报表(HTML) / 长度汇总表(HTML)
+      SHP 导出 / 撞管检测报告(HTML) / 撞管结果导出(CSV) / 统计报表(HTML) / 长度汇总表(HTML)
+      新增：最近文件夹记忆、按管线类型显隐图层、按点号/GID 定位
 """
 import os
 import sys
+import json
 import math
 import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import shapefile
+
+VERSION = "2.2"
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".gxviewer_cfg.json")
+
+
+def load_cfg():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_cfg(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 TYPE_COLOR = {"YS": "#e74c3c", "WS": "#8e44ad", "JS": "#2980b9", "RQ": "#e67e22",
               "DL": "#f1c40f", "TX": "#16a085", "RM": "#7f8c8d"}
@@ -709,7 +731,7 @@ class ProfileWin(tk.Toplevel):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("GXGC 管线数据库可视化与撞管分析系统 v2.1")
+        root.title("GXGC 管线数据库可视化与撞管分析系统 v2.2")
         root.geometry("1220x760")
         self.lines, self.points = [], []
         self.pt_map = {}
@@ -730,12 +752,32 @@ class App:
         self.schemas = {}
         self.prj_txt = ""
         self.data_dir = ""
+        self.cfg = load_cfg()
+        self.recent = self.cfg.get("recent", [])
+        self.last_dir = self.cfg.get("last_dir", "")
+        self.type_hide = set()
+        self.type_vars = {}
+        self.var_find = tk.StringVar()
         self.show = {"name": tk.BooleanVar(value=True), "dia": tk.BooleanVar(value=True),
                      "bottom": tk.BooleanVar(value=False), "ground": tk.BooleanVar(value=False)}
         self._build()
 
     # ───── 界面 ─────
     def _build(self):
+        # 菜单栏：文件（打开 / 最近 / 退出）、帮助（关于）
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        fmenu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="文件", menu=fmenu)
+        fmenu.add_command(label="打开数据文件夹…", command=self.open)
+        self.recent_menu = tk.Menu(fmenu, tearoff=0)
+        fmenu.add_cascade(label="最近打开", menu=self.recent_menu)
+        self._refresh_recent()
+        fmenu.add_separator()
+        fmenu.add_command(label="退出", command=self.root.quit)
+        hmenu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="帮助", menu=hmenu)
+        hmenu.add_command(label="关于", command=self._about)
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", padx=6, pady=3)
         ttk.Label(bar, text="QQ：799144685", foreground="#1f5fa8",
@@ -764,6 +806,8 @@ class App:
         self.btn_shp.pack(side="left", padx=6)
         self.btn_rep = ttk.Button(bar, text="撞管报告", command=self.exp_clash_rep, state="disabled")
         self.btn_rep.pack(side="left", padx=6)
+        self.btn_csv = ttk.Button(bar, text="撞管CSV", command=self.exp_clash_csv, state="disabled")
+        self.btn_csv.pack(side="left", padx=2)
         self.var_info = tk.StringVar(value="未加载数据")
         ttk.Label(bar, textvariable=self.var_info).pack(side="right")
 
@@ -774,6 +818,12 @@ class App:
                          ("bottom", "井底标高"), ("ground", "地面高程")):
             ttk.Checkbutton(bar2, text=txt, variable=self.show[key],
                             command=self.redraw).pack(side="left", padx=6)
+        ttk.Separator(bar2, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(bar2, text="定位:").pack(side="left")
+        ef = ttk.Entry(bar2, textvariable=self.var_find, width=12)
+        ef.pack(side="left", padx=2)
+        ef.bind("<Return>", lambda e: self._locate())
+        ttk.Button(bar2, text="查找", command=self._locate).pack(side="left")
         ttk.Label(bar2, text="（实测点=实心 ●  连接既有井=空心 ○）",
                   foreground="#888").pack(side="left", padx=12)
         self.btn_prof = ttk.Button(bar2, text="纵断面(选中管线)", command=self.show_profile,
@@ -851,6 +901,10 @@ class App:
             f.pack(fill="x", padx=6, pady=1)
             tk.Canvas(f, width=22, height=6, bg=c, highlightthickness=0).pack(side="left")
             ttk.Label(f, text=TYPE_NAME.get(t, t)).pack(side="left", padx=6)
+        self.type_frame = ttk.LabelFrame(right, text="类型显示（图层显隐）")
+        self.type_frame.pack(fill="x", pady=6)
+        ttk.Label(self.type_frame, text="勾选=显示；取消=隐藏该类型管线",
+                  foreground="#888", font=("", 9)).pack(anchor="w", padx=6)
 
         self.var_status = tk.StringVar(
             value="就绪 — 打开数据文件夹后：滚轮缩放 / 拖动平移(3D下拖动旋转) / 单击要素看属性")
@@ -881,9 +935,13 @@ class App:
 
     # ───── 数据 ─────
     def open(self):
-        d = filedialog.askdirectory(title="选择含 GXGC 数据(SHP)的文件夹")
+        d = filedialog.askdirectory(title="选择含 GXGC 数据(SHP)的文件夹",
+                                   initialdir=self.last_dir or None)
         if not d:
             return
+        self._load_folder(d)
+
+    def _load_folder(self, d):
         try:
             self.lines, self.points, self.schemas, self.prj_txt = load_shp_folder(d)
         except Exception as e:
@@ -893,19 +951,27 @@ class App:
             messagebox.showwarning("提示", "该文件夹内未发现 SHP 数据（*.shp）")
             return
         self.data_dir = d
+        self.last_dir = d
+        if d in self.recent:
+            self.recent.remove(d)
+        self.recent.insert(0, d)
+        self.recent = self.recent[:6]
+        save_cfg({"last_dir": self.last_dir, "recent": self.recent})
+        self._refresh_recent()
         self.pt_map = {p.gid: p for p in self.points if p.gid}
         for b in (self.btn_clash, self.btn_3d, self.btn_dxf, self.btn_rep,
-                  self.btn_profbox, self.btn_shp):
+                  self.btn_profbox, self.btn_shp, self.btn_csv):
             b.config(state="normal")
         self.clashes = []
         self.tv_clash.delete(*self.tv_clash.get_children())
         self.var_info.set(f"管线段 {len(self.lines)} 条 | 管线点 {len(self.points)} 个")
-        self.root.title(f"GXGC 可视化 v2.1 — {os.path.basename(d)}")
+        self.root.title(f"GXGC 可视化 v2.2 — {os.path.basename(d)}")
         self._fill_tables()
         self._fill_stats()
         self._fill_summary()
+        self._build_type_filter()
         self._fit()
-        self.var_status.set("数据已加载 — 滚轮缩放 / 拖动平移(3D下拖动旋转) / 单击要素看属性")
+        self.var_status.set("数据已加载 — 滚轮缩放 / 拖动平移(3D下拖动旋转) / 单击要素看属性 / 菜单「文件>最近打开」可快速重载")
 
     def _fit(self):
         self.root.update_idletasks()
@@ -960,11 +1026,15 @@ class App:
         for c in self.clashes:
             if c["kind"] == "ok":
                 continue
+            if c["l1"].type in self.type_hide and c["l2"].type in self.type_hide:
+                continue
             x, y = self._to_canvas(*c["pos"])
             color = "#c0392b" if c["kind"] == "clash" else "#e67e22"
             cv.create_oval(x - 12, y - 12, x + 12, y + 12, outline=color, width=2)
             cv.create_text(x, y - 16, text=KIND_TXT[c["kind"]], fill=color, font=("", fs))
         for ln in self.lines:
+            if ln.type in self.type_hide:
+                continue
             color = TYPE_COLOR.get(ln.type, "#34495e")
             pts = []
             for p in ln.pts:
@@ -976,6 +1046,8 @@ class App:
                 mx, my = self._to_canvas(*mid)
                 cv.create_text(mx, my - 6, text=f"{ln.dia:g}", fill=color, font=("", fs))
         for p in self.points:
+            if p.type in self.type_hide:
+                continue
             if p.x is None:
                 continue
             x, y = self._to_canvas(p.x, p.y)
@@ -1025,6 +1097,8 @@ class App:
 
         bottom_cache = {ln.gid: line_ends_bottom(ln, self.pt_map) for ln in self.lines}
         for ln in self.lines:
+            if ln.type in self.type_hide:
+                continue
             (b0, b1), _ = bottom_cache[ln.gid]
             segs = seg_lens(ln.pts)
             total = sum(segs) or 1
@@ -1048,6 +1122,8 @@ class App:
                                              tags=("line", gid))))
 
         for p in self.points:
+            if p.type in self.type_hide:
+                continue
             if p.x is None:
                 continue
             g = p.ground_h if p.ground_h is not None else 5.0
@@ -1067,6 +1143,8 @@ class App:
 
         for c in self.clashes:
             if c["kind"] == "ok":
+                continue
+            if c["l1"].type in self.type_hide and c["l2"].type in self.type_hide:
                 continue
             el = 0.0
             if c["b1"] is not None or c["b2"] is not None:
@@ -1414,6 +1492,102 @@ class App:
                                 f"字段结构同入库数据，含坐标系 .prj）")
         except Exception as e:
             messagebox.showerror("错误", f"SHP 导出失败：{e}")
+
+    # ───── 新增：最近文件夹 / 关于 / 图层显隐 / 定位 / 撞管CSV ─────
+    def _refresh_recent(self):
+        try:
+            self.recent_menu.delete(0, "end")
+        except Exception:
+            return
+        if not self.recent:
+            self.recent_menu.add_command(label="（无）", state="disabled")
+            return
+        for d in self.recent:
+            self.recent_menu.add_command(label=d, command=lambda d=d: self._load_folder(d))
+
+    def _about(self):
+        messagebox.showinfo("关于",
+            f"GXGC 管线数据库可视化与撞管分析系统\n版本 {VERSION}\n\n"
+            "作者：黄波  QQ：799144685\n\n"
+            "SHP 读取 / 2D-3D 浏览 / 撞管检测 / 纵断面 /\n"
+            "DXF·SHP·报告(HTML)·撞管(CSV) 导出\n\n"
+            "v2.2 新增：最近文件夹记忆、撞管结果 CSV 导出、\n"
+            "按管线类型显隐图层、按点号/GID 定位")
+
+    def _build_type_filter(self):
+        for w in list(self.type_frame.winfo_children())[1:]:
+            w.destroy()
+        self.type_hide = set()
+        self.type_vars = {}
+        types = sorted({ln.type for ln in self.lines if ln.type} |
+                      {p.type for p in self.points if p.type})
+        if not types:
+            return
+        grid = ttk.Frame(self.type_frame)
+        grid.pack(fill="x", padx=6, pady=2)
+        for i, t in enumerate(types):
+            v = tk.BooleanVar(value=(t not in self.type_hide))
+            self.type_vars[t] = v
+            ttk.Checkbutton(grid, text=TYPE_NAME.get(t, t),
+                           variable=v, command=self._toggle_type
+                           ).grid(row=i // 2, column=i % 2, sticky="w", padx=6)
+
+    def _toggle_type(self):
+        self.type_hide = {t for t, v in self.type_vars.items() if not v.get()}
+        self.redraw()
+
+    def _locate(self):
+        if not (self.lines or self.points):
+            return
+        q = self.var_find.get().strip().upper()
+        if not q:
+            return
+        hit = next((p for p in self.points
+                    if (p.name and q in p.name.upper()) or q in p.gid), None)
+        if not hit:
+            hit = next((ln for ln in self.lines if q in ln.gid), None)
+        if not hit:
+            self.var_status.set(f"未找到匹配「{self.var_find.get()}」的管点/管线段")
+            return
+        if hasattr(hit, "pts"):
+            xs = [p[0] for p in hit.pts]
+            ys = [p[1] for p in hit.pts]
+            self.cx, self.cy = sum(xs) / len(xs), sum(ys) / len(ys)
+            self._show_line(hit.gid)
+        else:
+            self.cx, self.cy = hit.x, hit.y
+            self._show_pt(hit.gid)
+        self.scale = max(self.scale, 10)
+        self.redraw()
+        self.var_status.set(f"已定位：{hit.name or hit.gid[:8]}")
+
+    def exp_clash_csv(self):
+        if not self.clashes:
+            messagebox.showinfo("提示", "请先执行撞管检测（点工具栏「撞管检测」）")
+            return
+        p = self._ask_save("撞管检测结果.csv", [("CSV", "*.csv")])
+        if not p:
+            return
+        try:
+            import csv
+            with open(p, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["序号", "判定", "管线①类型", "管线①管径mm", "管线②类型",
+                            "管线②管径mm", "管线①管底标高", "管线②管底标高",
+                            "垂直净距(m)", "交叉位置_东", "交叉位置_北"])
+                for i, c in enumerate(self.clashes, 1):
+                    a, b = c["l1"], c["l2"]
+                    w.writerow([
+                        i, KIND_TXT[c["kind"]],
+                        TYPE_NAME.get(a.type, a.type), f"{a.dia:g}",
+                        TYPE_NAME.get(b.type, b.type), f"{b.dia:g}",
+                        f'{c["b1"]:.3f}' if c["b1"] is not None else "",
+                        f'{c["b2"]:.3f}' if c["b2"] is not None else "",
+                        f'{c["gap"]:+.3f}' if c["gap"] is not None else "",
+                        f'{c["pos"][1]:.3f}', f'{c["pos"][0]:.3f}'])
+            self.var_status.set(f"撞管结果 CSV 已导出：{p}（UTF-8-SIG，Excel 可直接打开）")
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
 
 
 def main():

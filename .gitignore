@@ -42,6 +42,9 @@ env/
 *.egg-info/
 .ipynb_checkpoints/
 
+# ===== 本地配置（运行时生成，用户相关，不入库） =====
+.gxviewer_cfg.json
+
 # ===== 日志 / 临时文件 =====
 *.log
 *.tmp
