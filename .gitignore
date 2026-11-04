@@ -1,0 +1,37 @@
+# ===== 编译产物 / 构建输出 =====
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+.vs/
+
+# ===== Visual Studio / Rider =====
+.vscode/
+.idea/
+*.sln.cache
+*.tmp
+
+# ===== NuGet =====
+packages/
+*.nupkg
+project.lock.json
+
+# ===== AutoCAD / .NET 相关 =====
+*.dll
+*.exe
+# 如果要把自己编译出的插件 DLL 也纳管，删掉上面两行
+*.pdb
+*.cache
+
+# ===== 系统 / 编辑器垃圾 =====
+Thumbs.db
+Desktop.ini
+.DS_Store
+~$*
+
+# ===== 日志 / 临时文件 =====
+*.log
+*.tmp
+*.bak
+backup/
