@@ -30,6 +30,18 @@ Desktop.ini
 .DS_Store
 ~$*
 
+# ===== Python（管线可视化等脚本） =====
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+.ipynb_checkpoints/
+
 # ===== 日志 / 临时文件 =====
 *.log
 *.tmp
